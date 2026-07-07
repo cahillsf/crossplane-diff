@@ -233,9 +233,16 @@ func TestDefaultDiffCalculator_CalculateDiff(t *testing.T) {
 				// Create mock resource tree client (not used in this test)
 				resourceTreeClient := tu.NewMockResourceTreeClient().Build()
 
+				// Composed resource with a Crossplane composed field owner so the
+				// SSA dry-run path is exercised (and fails as the test expects).
+				existingComposed := tu.NewResource("example.org/v1", "TestResource", "existing-resource").
+					WithSpecField("field", "old-value").
+					WithFieldManagers("apiextensions.crossplane.io/composed/abc123").
+					Build()
+
 				// Create mock resource client for resource manager
 				resourceClient := tu.NewMockResourceClient().
-					WithResourcesExist(existingResource).
+					WithResourcesExist(existingComposed).
 					Build()
 
 				// Create resource manager
