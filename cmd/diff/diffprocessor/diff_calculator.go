@@ -119,41 +119,51 @@ func (c *DefaultDiffCalculator) CalculateDiff(ctx context.Context, composite *un
 	wouldBeResult := desired
 
 	if current != nil {
-		// Extract the Crossplane field owner from the existing object's managedFields.
-		// This ensures our dry-run apply uses the same field owner as Crossplane,
-		// which correctly handles field removal detection (SSA removes fields that
-		// are owned by this manager but not present in the apply request).
+		// For composed resources we use a SSA dry-run with the Crossplane field manager
+		// so the API server correctly merges Crossplane-owned fields and drops any that
+		// Crossplane no longer sets.
+		//
+		// For XRs (no composed owner) the user controls the spec directly (e.g. via
+		// Helm's non-SSA Update). We cannot impersonate that manager via SSA because
+		// non-SSA-owned fields are not removed when omitted from an SSA Apply. Instead
+		// we compare the desired state directly to the current cluster state, which
+		// correctly reflects additions and removals in the user-controlled spec.
 		fieldOwner := k8.GetComposedFieldOwner(current)
 
-		// Deep-copy before stripping ownerReferences so the rendered desired (used
-		// for downstream diff comparison) isn't mutated.
-		applyDesired := desired.DeepCopy()
+		if fieldOwner != "" {
+			// Deep-copy before stripping ownerReferences so the rendered desired (used
+			// for downstream diff comparison) isn't mutated.
+			applyDesired := desired.DeepCopy()
 
-		// Strip ownerReferences too. SSA merges list items by UID and
-		// tracks per-field ownership: if we apply our rendered ownerRef
-		// (with our own field owner) and the cluster resource already has
-		// an ownerRef to the same parent managed by a different field
-		// owner, both survive the merge and the apiserver rejects the
-		// multi-controller state. Leaving ownerRefs out of the apply
-		// preserves whatever the cluster already has; for new resources
-		// (current == nil) we skip DryRunApply entirely so the rendered
-		// ownerRefs still surface in the diff output.
-		un.RemoveNestedField(applyDesired.Object, "metadata", "ownerReferences")
+			// Strip ownerReferences too. SSA merges list items by UID and
+			// tracks per-field ownership: if we apply our rendered ownerRef
+			// (with our own field owner) and the cluster resource already has
+			// an ownerRef to the same parent managed by a different field
+			// owner, both survive the merge and the apiserver rejects the
+			// multi-controller state. Leaving ownerRefs out of the apply
+			// preserves whatever the cluster already has; for new resources
+			// (current == nil) we skip DryRunApply entirely so the rendered
+			// ownerRefs still surface in the diff output.
+			un.RemoveNestedField(applyDesired.Object, "metadata", "ownerReferences")
 
-		// Perform a dry-run apply to get the result after we'd apply
-		c.logger.Debug("Performing dry-run apply",
-			"resource", resourceID,
-			"name", desired.GetName(),
-			"fieldOwner", fieldOwner,
-			"desired", applyDesired)
+			// Perform a dry-run apply to get the result after we'd apply
+			c.logger.Debug("Performing dry-run apply",
+				"resource", resourceID,
+				"name", desired.GetName(),
+				"fieldOwner", fieldOwner,
+				"desired", applyDesired)
 
-		wouldBeResult, err = c.applyClient.DryRunApply(ctx, applyDesired, fieldOwner)
-		if err != nil {
-			c.logger.Debug("Dry-run apply failed", "resource", resourceID, "error", err)
-			return nil, errors.Wrap(err, "cannot dry-run apply desired object")
+			wouldBeResult, err = c.applyClient.DryRunApply(ctx, applyDesired, fieldOwner)
+			if err != nil {
+				c.logger.Debug("Dry-run apply failed", "resource", resourceID, "error", err)
+				return nil, errors.Wrap(err, "cannot dry-run apply desired object")
+			}
+
+			c.logger.Debug("Dry-run apply succeeded", "resource", resourceID, "result", wouldBeResult)
+		} else {
+			c.logger.Debug("Skipping SSA dry-run for non-composed resource; comparing desired directly",
+				"resource", resourceID)
 		}
-
-		c.logger.Debug("Dry-run apply succeeded", "resource", resourceID, "result", wouldBeResult)
 	}
 
 	// Generate diff with the configured options
